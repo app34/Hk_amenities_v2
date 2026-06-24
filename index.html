@@ -26,10 +26,17 @@
         .notes-input::placeholder { color: #004400; }
         
         .search-filter-section { margin-bottom: 12px; background: rgba(0, 20, 0, 0.3); border: 1px solid #00cc00; border-radius: 6px; padding: 10px; }
-        .search-container { position: relative; margin-bottom: 8px; }
-        .search-input { width: 100%; background: rgba(0, 0, 0, 0.8); color: #00cc00; border: 2px solid #00cc00; border-radius: 5px; padding: 8px 30px 8px 10px; font-size: 12px; height: 36px; }
-        .search-clear { position: absolute; right: 8px; top: 50%; transform: translateY(-50%); background: none; border: none; color: #00cc00; cursor: pointer; font-size: 16px; display: none; }
+        .search-container { position: relative; margin-bottom: 8px; display: flex; gap: 6px; }
+        .search-input { flex: 1; background: rgba(0, 0, 0, 0.8); color: #00cc00; border: 2px solid #00cc00; border-radius: 5px; padding: 8px 30px 8px 10px; font-size: 12px; height: 36px; }
+        .search-clear { position: absolute; right: 54px; top: 50%; transform: translateY(-50%); background: none; border: none; color: #00cc00; cursor: pointer; font-size: 16px; display: none; z-index: 5; }
         .search-clear.show { display: block; }
+        
+        /* New Database Refresh Sync Button Style */
+        .sync-btn { background: rgba(0, 0, 0, 0.8); color: #00cc00; border: 2px solid #00cc00; width: 42px; height: 36px; border-radius: 5px; cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 16px; font-weight: bold; transition: all 0.2s ease; }
+        .sync-btn:active { background: rgba(0, 204, 0, 0.2); transform: scale(0.95); }
+        .sync-btn.spinning { animation: spin 0.8s linear infinite; pointer-events: none; border-color: #00ccff; color: #00ccff; }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+
         .filter-container { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 4px; justify-content: center; }
         .filter-btn { background: rgba(0, 0, 0, 0.8); color: #00cc00; border: 1px solid #00cc00; padding: 4px 8px; border-radius: 12px; cursor: pointer; font-size: 11px; }
         .filter-btn.active { background: rgba(0, 204, 0, 0.25); color: #ffffff; box-shadow: 0 0 10px rgba(0, 204, 0, 0.4); }
@@ -118,8 +125,9 @@
         <div class="search-filter-section">
             <div class="section-title">🔍 Filter Heading Rows</div>
             <div class="search-container">
-                <input type="text" class="search-input" id="search-input" placeholder="Connecting to cloud matrix database...">
+                <input type="text" class="search-input" id="search-input" placeholder="Search items...">
                 <button class="search-clear" id="search-clear" onclick="clearSearch()">✕</button>
+                <button class="sync-btn" id="sync-btn" onclick="syncCloudDatabase()" title="Sync Live Database">🔄</button>
             </div>
             <div class="filter-container" id="filter-container">
                 <button class="filter-btn active" data-category="all" onclick="filterByCategory('all')">All Columns</button>
@@ -200,14 +208,14 @@
     <div class="floating-buttons floating-whatsapp" id="floating-whatsapp"><button class="floating-btn" onclick="shareToWhatsApp()">📱</button></div>
 
     <script>
-        const STORAGE_KEYS = { SHARE_HISTORY: 'oblu_share_history' };
+        const STORAGE_KEYS = { 
+            SHARE_HISTORY: 'oblu_share_history',
+            MATRIX_CACHE: 'oblu_matrix_cache' 
+        };
         
-        // Active verified live link pre-populated
         const WEB_APP_URL = "https://script.google.com/macros/s/AKfycbznho1OV5R0GPXW1nIjJeXmoUOv3M75yJbvxrKtRBAVPW--Y4XtMpjuPvVVK124GlKn/exec";
 
-        // Completely clean object container — matrix data loads solely via Google Script database
         let AMENITIES_CATEGORIES = {};
-
         let AMENITIES = []; let selectedAmenities = []; let selectedVilla = null;
         let adminAuthenticated = false; let currentSearchTerm = ''; let currentCategoryFilter = 'all'; let searchTimeout = null;
         const villaNames = { 'water-villa-1st': 'Water Villa 1st Pantry', 'water-villa-2nd': 'Water Villa 2nd Pantry', 'beach-villa-1st': 'Beach Villa 1st Pantry', 'beach-villa-2nd': 'Beach Villa 2nd Pantry' };
@@ -215,34 +223,67 @@
         document.addEventListener('DOMContentLoaded', function() { loadInitialData(); initializeUI(); });
 
         function loadInitialData() {
-            updateAmenitiesArray();
-            renderAmenities();
+            // INSTANT LOAD: Read from localStorage cache first
+            const localCache = localStorage.getItem(STORAGE_KEYS.MATRIX_CACHE);
+            if (localCache) {
+                try {
+                    AMENITIES_CATEGORIES = JSON.parse(localCache);
+                    updateAmenitiesArray();
+                    renderAmenities();
+                } catch(e) {
+                    console.error("Cache parsing mismatch, bypassing cache layout.", e);
+                }
+            }
             
+            // Background fetch on startup to silent-sync changes if online
+            if (WEB_APP_URL) {
+                fetch(WEB_APP_URL)
+                .then(res => res.json())
+                .then(data => {
+                    if (data && typeof data === 'object' && !Array.isArray(data) && Object.keys(data).length > 0 && data._status !== "empty") {
+                        AMENITIES_CATEGORIES = data;
+                        localStorage.setItem(STORAGE_KEYS.MATRIX_CACHE, JSON.stringify(data));
+                        updateAmenitiesArray(); 
+                        renderAmenities();
+                        if (adminAuthenticated) updateCategoryManagement();
+                    }
+                }).catch(err => console.log("Startup sync bypassed (offline layout mode)."));
+            }
+        }
+
+        // New feature: Force manual sync from spreadsheet
+        function syncCloudDatabase() {
             if (!WEB_APP_URL) {
-                document.getElementById('search-input').placeholder = "Missing cloud connection string...";
+                showMessage("Sync setup missing URL key", "error");
                 return;
             }
+            
+            const btn = document.getElementById('sync-btn');
+            btn.classList.add('spinning');
             
             fetch(WEB_APP_URL)
             .then(res => res.json())
             .then(data => {
+                btn.classList.remove('spinning');
                 if (data && typeof data === 'object' && !Array.isArray(data) && Object.keys(data).length > 0) {
                     if (data._status === "empty") {
-                        document.getElementById('search-input').placeholder = "Database empty. Access Admin panel to build layout columns.";
+                        showMessage("Cloud database currently completely empty.", "error");
                     } else {
                         AMENITIES_CATEGORIES = data;
+                        localStorage.setItem(STORAGE_KEYS.MATRIX_CACHE, JSON.stringify(data));
                         updateAmenitiesArray(); 
                         renderAmenities();
                         if (adminAuthenticated) updateCategoryManagement();
-                        showMessage("Cloud Matrix Live Synchronized!", "success");
-                        document.getElementById('search-input').placeholder = "Search items...";
+                        showMessage("🔄 Sync Complete & Cached!", "success");
                     }
                 } else {
-                    document.getElementById('search-input').placeholder = "Database pristine. Use Admin to expand column map.";
+                    showMessage("Blank profile structure synced", "error");
                 }
-            }).catch(err => {
-                console.warn("Cloud pull failed:", err);
-                document.getElementById('search-input').placeholder = "Network disconnection offline mode...";
+            })
+            .catch(err => {
+                btn.classList.remove('spinning');
+                console.error(err);
+                showMessage("❌ Connection error. Failed to sync.", "error");
             });
         }
 
@@ -320,7 +361,7 @@
         function renderAmenities() {
             const grid = document.getElementById('amenities-grid'); grid.innerHTML = '';
             if (Object.keys(AMENITIES_CATEGORIES).length === 0) {
-                grid.innerHTML = '<div class="no-results">System template empty. Unlock Admin Panel below to create headers and add items.</div>'; return;
+                grid.innerHTML = '<div class="no-results">System template empty. Unlock Admin Panel below or tap 🔄 to sync rows.</div>'; return;
             }
             Object.keys(AMENITIES_CATEGORIES).forEach(cat => {
                 const h = document.createElement('div'); h.className = 'category-header'; h.textContent = cat; grid.appendChild(h);
@@ -492,6 +533,9 @@
 
         function saveAndReload() { 
             updateAmenitiesArray(); renderAmenities(); updateCategoryManagement(); 
+            // Mirrored Save: Always secure a safe local copy of data state
+            localStorage.setItem(STORAGE_KEYS.MATRIX_CACHE, JSON.stringify(AMENITIES_CATEGORIES));
+            
             if (WEB_APP_URL) {
                 fetch(WEB_APP_URL, {
                     method: "POST",
@@ -516,7 +560,7 @@
                 if (parsed && typeof parsed === 'object') { AMENITIES_CATEGORIES = parsed; saveAndReload(); document.getElementById('import-amenities').value=''; showMessage('Matrix map restored!', 'success'); }
             } catch (e) { showMessage('Invalid JSON configuration layout!', 'error'); }
         }
-        function resetAmenities() { if(confirm('Wipe complete structure data?')) { AMENITIES_CATEGORIES={}; selectedAmenities=[]; updateSelectedItemsDisplay(); saveAndReload(); } }
+        function resetAmenities() { if(confirm('Wipe complete structure data?')) { AMENITIES_CATEGORIES={}; selectedAmenities=[]; localStorage.removeItem(STORAGE_KEYS.MATRIX_CACHE); updateSelectedItemsDisplay(); saveAndReload(); } }
     </script>
 </body>
 </html>
